@@ -1,0 +1,67 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: process-build-command
+spec:
+  params:
+    - name: comment
+      type: string
+    - name: repo_type
+      type: string
+  results:
+    - name: should-build
+      description: "true if the build should proceed, false otherwise"
+    - name: build-command
+      description: "The processed build command"
+    - name: distro
+    - name: target
+    - name: arch
+    - name: export-format
+    - name: mpp-file
+    - name: mode
+  steps:
+    - name: process-command
+      image: quay.io/centos/centos:stream9
+      script: |
+        #!/bin/bash
+        set -ex
+        comment="$(params.comment)"
+        repo_type="$(params.repo_type)"
+        echo "Received comment: $comment"
+        echo "Repository type: $repo_type"
+
+        if [[ "$comment" =~ ^/build ]]; then
+          echo "Manual build command detected"
+          echo "true" > $(results.should-build.path)
+          build_command="${comment#*/}"  # Remove leading /build or /make
+        else
+          echo "Invalid comment format"
+          echo "false" > $(results.should-build.path)
+          echo "Invalid comment format" >&2
+          exit 0
+        fi
+
+        echo "Using build command: $build_command"
+        echo "$build_command" > $(results.build-command.path)
+
+        if [[ "$repo_type" == "automotive-image-builder" ]]; then
+          distro=$(echo "$build_command" | grep -oP '(?<=--distro\s)\S+')
+          target=$(echo "$build_command" | grep -oP '(?<=--target\s)\S+')
+          arch=$(echo "$build_command" | grep -oP '(?<=--arch=)\S+')
+          export_format=$(echo "$build_command" | grep -oP '(?<=--export\s)\S+')
+          mode=$(echo "$build_command" | grep -oP '(?<=--mode\s)\S+' || echo "")
+          make_argument=""
+        fi
+
+        echo -n "$distro" > $(results.distro.path)
+        echo -n "$target" > $(results.target.path)
+        echo -n "$arch" > $(results.arch.path)
+        echo -n "$export_format" > $(results.export-format.path)
+        echo -n "$mode" > $(results.mode.path)
+
+        echo "should-build result: $(cat $(results.should-build.path))"
+        echo "build-command result: $(cat $(results.build-command.path))"
+        echo "arch result: $(cat $(results.arch.path))"
+        echo "mode result: $(cat $(results.mode.path))"
+

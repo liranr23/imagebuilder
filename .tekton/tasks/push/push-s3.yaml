@@ -1,0 +1,62 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: push-artifact-s3
+spec:
+  params:
+    - name: build-pvc-name
+      type: string
+    - name: distro
+      type: string
+    - name: target
+      type: string
+    - name: export-format
+      type: string
+    - name: bucket
+      type: string
+    - name: secret-ref
+      type: string
+  steps:
+    - name: push-artifact
+      image: amazon/aws-cli
+      env:
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: $(params.secret-ref)
+              key: AWS_ACCESS_KEY_ID
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: $(params.secret-ref)
+              key: AWS_SECRET_ACCESS_KEY
+      script: |
+        #!/bin/sh
+        set -ex
+
+        # Determine file extension based on export format
+        if [ "$(params.export-format)" = "image" ]; then
+          file_extension=".raw"
+        elif [ "$(params.export-format)" = "qcow2" ]; then
+          file_extension=".qcow2"
+        else
+          file_extension="$(params.export-format)"
+        fi
+
+        # Create the export file name with the correct extension
+        exportFile=$(params.distro)-$(params.target)-$(params.export-format)${file_extension}
+
+        echo "Pushing image to S3 bucket $(params.bucket)"
+        aws s3 cp /output/$exportFile s3://$(params.bucket)/$exportFile
+
+        echo "Image pushed successfully to S3"
+      volumeMounts:
+        - name: task-pvc
+          mountPath: /output
+      workingDir: /output
+  volumes:
+    - name: task-pvc
+      persistentVolumeClaim:
+        claimName: $(params.build-pvc-name)
+

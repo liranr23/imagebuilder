@@ -1,0 +1,65 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: infra-ci-operator-buildah-push
+spec:
+  params:
+    - name: image-name
+      type: string
+    - name: amd64
+      type: string
+    - name: arm64
+      type: string
+  steps:
+    - env:
+        - name: STORAGE_DRIVER
+          value: vfs
+      image: 'registry.access.redhat.com/ubi9/buildah@sha256:164cb956f431472d2c76cb6d1ba0c5a3f20ebb41e99a2aeb2bf151c6558243bc'
+      name: push
+      script: |
+        #!/bin/bash
+        set -Eeuo pipefail
+
+        # Handle registry credentials
+        if [[ "$(workspaces.dockerconfig.bound)" == "true" ]]; then
+          if test -f "$(workspaces.dockerconfig.path)/config.json"; then
+            export DOCKER_CONFIG="$(workspaces.dockerconfig.path)"
+          elif test -f "$(workspaces.dockerconfig.path)/.dockerconfigjson"; then
+            mkdir -p $HOME/.docker
+            cp "$(workspaces.dockerconfig.path)/.dockerconfigjson" "$HOME/.docker/config.json"
+            export DOCKER_CONFIG="$HOME/.docker"
+          else
+            echo "neither 'config.json' nor '.dockerconfigjson' found at workspace root"
+            exit 1
+          fi
+        fi
+
+        declare -a iids=()
+        if [[ $(params.amd64) == "true" ]]; then
+          iid=$(buildah pull oci-archive:/srv/oci-images/x86_64.tar)
+          iids+=("$iid")
+        fi
+        if [[ $(params.arm64) == "true" ]]; then
+          iid=$(buildah pull oci-archive:/srv/oci-images/aarch64.tar)
+          iids+=("$iid")
+        fi
+        buildah manifest create localhost/multi-arch-image "${iids[@]}"
+        buildah manifest push --all localhost/multi-arch-image docker://$(params.image-name)
+      securityContext:
+        capabilities:
+          add:
+            - SETFCAP
+      volumeMounts:
+        - mountPath: /var/lib/containers
+          name: container-storage
+  volumes:
+    - emptyDir: {}
+      name: container-storage
+  workspaces:
+    - mountPath: /srv/oci-images
+      name: oci-images
+    - description: An optional workspace that allows providing a .docker/config.json file for Buildah to access the container registry. The file should be placed at the root of the Workspace with name config.json or .dockerconfigjson.
+      name: dockerconfig
+      optional: true
+
