@@ -1,0 +1,43 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: infra-ci-operator-buildah-build
+spec:
+  params:
+    - default: .
+      name: context-dir
+      type: string
+    - default: Containerfile
+      name: containerfile-path
+      type: string
+    - default: ''
+      name: build-args
+      type: string
+  steps:
+    - env:
+        - name: STORAGE_DRIVER
+          value: vfs
+      image: 'registry.access.redhat.com/ubi9/buildah@sha256:164cb956f431472d2c76cb6d1ba0c5a3f20ebb41e99a2aeb2bf151c6558243bc'
+      name: build
+      script: |
+        #!/bin/bash
+        set -Eeuo pipefail
+        buildah build $(params.build-args) -t localhost/image:$(uname -m) -f $(workspaces.source-workspace.path)/$(params.containerfile-path) $(workspaces.source-workspace.path)/$(params.context-dir)
+        buildah push localhost/image:$(uname -m) oci-archive:/srv/oci-images/$(uname -m).tar
+      securityContext:
+        capabilities:
+          add:
+            - SETFCAP
+      volumeMounts:
+        - mountPath: /var/lib/containers
+          name: container-storage
+  volumes:
+    - emptyDir: {}
+      name: container-storage
+  workspaces:
+    - description: Workspace containing source code
+      name: source-workspace
+    - mountPath: /srv/oci-images
+      name: oci-images
+

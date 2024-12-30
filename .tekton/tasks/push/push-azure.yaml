@@ -1,0 +1,57 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: push-artifact-azure
+spec:
+  params:
+    - name: build-pvc-name
+      type: string
+    - name: distro
+      type: string
+    - name: target
+      type: string
+    - name: export-format
+      type: string
+    - name: container
+      type: string
+    - name: secret-ref
+      type: string
+  steps:
+    - name: push-artifact
+      image: mcr.microsoft.com/azure-cli
+      env:
+        - name: AZURE_STORAGE_CONNECTION_STRING
+          valueFrom:
+            secretKeyRef:
+              name: $(params.secret-ref)
+              key: AZURE_STORAGE_CONNECTION_STRING
+      script: |
+        #!/bin/sh
+        set -ex
+
+        # Determine file extension based on export format
+        if [ "$(params.export-format)" = "image" ]; then
+          file_extension=".raw"
+        elif [ "$(params.export-format)" = "qcow2" ]; then
+          file_extension=".qcow2"
+        else
+          file_extension="$(params.export-format)"
+        fi
+
+        # Create the export file name with the correct extension
+        exportFile=$(params.distro)-$(params.target)-$(params.export-format)${file_extension}
+
+        echo "Pushing image to Azure container $(params.container)"
+        az storage blob upload --container-name $(params.container) --file /output/$exportFile --name $exportFile
+
+        echo "Image pushed successfully to Azure"
+      volumeMounts:
+        - name: task-pvc
+          mountPath: /output
+      workingDir: /output
+  volumes:
+    - name: task-pvc
+      persistentVolumeClaim:
+        claimName: $(params.build-pvc-name)
+

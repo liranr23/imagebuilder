@@ -1,0 +1,163 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: build-automotive-image-arm64
+spec:
+  params:
+    - name: target-architecture
+    - name: distro
+    - name: target
+    - name: mode
+    - name: export-format
+    - name: build-pvc-name
+    - name: automotive-osbuild-image
+    - name: secret-ref
+  workspaces:
+    - name: shared-workspace
+      mountPath: /workspace/shared
+    - name: mpp-config-workspace
+      mountPath: /workspace/mpp-config
+  steps:
+    - name: find-mpp-file
+      image: busybox
+      script: |
+        #!/bin/sh
+        set -e
+        MPP_FILE=$(find $(workspaces.mpp-config-workspace.path) -name '*.mpp.yml' -type f)
+        if [ -z "$MPP_FILE" ]; then
+          echo "No .mpp.yml file found in the ConfigMap"
+          exit 1
+        fi
+        echo $MPP_FILE > /tekton/results/mpp-file-path
+
+    - name: build-image
+      env:
+        - name: REGISTRY_AUTH_FILE
+          value: /tekton/home/.docker/config.json
+      image: $(params.automotive-osbuild-image)
+      imagePullPolicy: Always
+      securityContext:
+        privileged: true
+        seLinuxOptions:
+          type: unconfined_t
+      script: |
+        #!/bin/bash
+        set -e
+
+        echo "Current working directory:"
+        pwd
+
+        # Environment preparation
+        osbuildPath="/usr/bin/osbuild"
+        storePath="/_build"
+        runTmp="/run/osbuild/"
+
+        # Create necessary directories
+        mkdir -p "$storePath"
+        mkdir -p "$runTmp"
+
+        if mountpoint -q "$osbuildPath"; then
+          exit 0
+        fi
+
+        rootType="system_u:object_r:root_t:s0"
+        chcon "$rootType" "$storePath"
+
+        installType="system_u:object_r:install_exec_t:s0"
+        if ! mountpoint -q "$runTmp"; then
+          mount -t tmpfs tmpfs "$runTmp"
+        fi
+
+        destPath="$runTmp/osbuild"
+        cp -p "$osbuildPath" "$destPath"
+        chcon "$installType" "$destPath"
+
+        mount --bind "$destPath" "$osbuildPath"
+
+        # print workspace directory
+        echo "Workspace directory: $(workspaces.shared-workspace.path)"
+
+        # Change to the workspace directory
+        cd $(workspaces.shared-workspace.path)
+
+        # Determine file extension based on export format
+        if [ "$(params.export-format)" = "image" ]; then
+          file_extension=".raw"
+        elif [ "$(params.export-format)" = "qcow2" ]; then
+          file_extension=".qcow2"
+        else
+          file_extension="$(params.export-format)"
+        fi
+
+        # Create the export file name with the correct extension
+        exportFile=$(params.distro)-$(params.target)-$(params.export-format)${file_extension}
+
+        mode_param=""
+        if [ -n "$(params.mode)" ]; then
+          mode_param="--mode $(params.mode)"
+        fi
+
+        MPP_FILE=$(cat /tekton/results/mpp-file-path)
+
+        CUSTOM_DEFS=""
+        CUSTOM_DEFS_FILE="$(workspaces.mpp-config-workspace.path)/custom-definitions.env"
+        if [ -f "$CUSTOM_DEFS_FILE" ]; then
+          echo "Processing custom definitions from $CUSTOM_DEFS_FILE"
+          while read -r line || [[ -n "$line" ]]; do
+            for def in $line; do
+              CUSTOM_DEFS+=" --define $def"
+            done
+          done < "$CUSTOM_DEFS_FILE"
+        else
+          echo "No custom-definitions.env file found"
+        fi
+
+        build_command="automotive-image-builder --verbose \
+          build \
+          $CUSTOM_DEFS \
+          --distro $(params.distro) \
+          --target $(params.target) \
+          --arch=$(params.target-architecture) \
+          --build-dir=/output/_build \
+          --export $(params.export-format) \
+          --osbuild-manifest=/output/image.json \
+          $mode_param \
+          $MPP_FILE \
+          /output/${exportFile}"
+
+        echo "Running the build command: $build_command"
+
+        $build_command
+
+        # TODO: move to test later
+        pushd /output
+        ln -s ./${exportFile} ./disk.img
+
+        echo "Build command completed. Listing output directory:"
+        ls -l
+      volumeMounts:
+        - name: dev
+          mountPath: /dev
+        - name: build
+          mountPath: /_build
+        - name: task-pvc
+          mountPath: /output
+        - name: task-pvc
+          mountPath: /run/osbuild
+        - name: docker-config
+          mountPath: /tekton/home/.docker/config.json
+          subPath: .dockerconfigjson
+  volumes:
+    - name: dev
+      hostPath:
+        path: /dev
+    - name: build
+      emptyDir: {}
+    - name: task-pvc
+      persistentVolumeClaim:
+        claimName: $(params.build-pvc-name)
+    - name: docker-config
+      secret:
+        secretName: $(params.secret-ref)
+

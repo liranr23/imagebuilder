@@ -1,0 +1,85 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: infra-ci-operator-run-tests
+spec:
+  description: This task perform the unit test operation
+  params:
+    - default: 'true'
+      description: Log the commands that are executed during the operation.
+      name: VERBOSE
+      type: string
+    - default: ''
+      description: The path in source to the tests
+      name: PATH
+      type: string
+    - default: ''
+      description: The args to the command
+      name: ARGS
+      type: string
+  steps:
+    - env:
+        - name: STORAGE_DRIVER
+          value: vfs
+        - name: PARAM_VERBOSE
+          value: $(params.VERBOSE)
+        - name: PARAM_PATH
+          value: $(params.PATH)
+        - name: PARAM_ARGS
+          value: $(params.ARGS)
+      image: 'registry.redhat.io/rhel9/buildah'
+      name: unit-test
+      script: |
+        #!/bin/bash
+        set -Eeuo pipefail
+
+        echo "Loading image for architecture $(uname -m)..."
+        # Waiting a bit for the build tasks to stop operating on the files
+        sleep 10
+        iid=$(buildah pull oci-archive:/srv/oci-images/$(uname -m).tar)
+        dnf install podman -y
+        cid=$(podman container run -dt -p 8080:80 $iid)
+        echo "waiting to the container..."
+        podman container wait --condition running $cid
+
+        if [ "${PARAM_VERBOSE}" = "true" ] ; then
+          set -x
+        fi
+
+        if ! [ -f "${PARAM_PATH}" ]; then
+          echo "${PARAM_PATH} does not exist. Skipping tests"
+          exit
+        fi
+
+        echo "Running tests"
+
+        bash /workspace/source-workspace/${PARAM_PATH} ${PARAM_ARGS}
+        EXIT_CODE="$?"
+        if [ "${EXIT_CODE}" != 0 ] ; then
+          echo "Tests failed."
+          exit "${EXIT_CODE}"
+        fi
+        echo "Tests passed."
+
+        sleep 1
+      securityContext:
+        capabilities:
+          add:
+            - SETFCAP
+            - SYS_ADMIN
+            - SYS_RESOURCE
+        privileged: true
+      volumeMounts:
+        - mountPath: /var/lib/containers
+          name: container-storage
+      workingDir: $(workspaces.source-workspace.path)
+  volumes:
+    - emptyDir: {}
+      name: container-storage
+  workspaces:
+    - description: A workspace that contains the fetched git repository.
+      name: source-workspace
+    - mountPath: /srv/oci-images
+      name: oci-images
+

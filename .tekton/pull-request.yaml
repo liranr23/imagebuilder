@@ -1,0 +1,196 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  annotations:
+    build.appstudio.openshift.io/repo:
+    build.appstudio.redhat.com/commit_sha: '{{revision}}'
+    build.appstudio.redhat.com/pull_request_number: '{{pull_request_number}}'
+    build.appstudio.redhat.com/target_branch: '{{target_branch}}'
+    pipelinesascode.tekton.dev/max-keep-runs: "3"
+    pipelinesascode.tekton.dev/on-cel-expression: event == "pull_request" && target_branch
+      == "main"
+    pipelinesascode.tekton.dev/task: "[.tekton/tasks/build/create-pvc.yaml, .tekton/tasks/build/build-amd64.yaml, .tekton/tasks/build/build-arm64.yaml, .tekton/tasks/build/process-command.yaml,
+      .tekton/tasks/push/push-reg.yaml, .tekton/tasks/push/push-s3.yaml, .tekton/tasks/push/push-azure.yaml]"
+  creationTimestamp: null
+  labels:
+    appstudio.openshift.io/application: imagebuilder
+    appstudio.openshift.io/component: imagebuilder
+    pipelines.appstudio.openshift.io/type: build
+  generateName: imagebuilder-pipeline-
+  namespace: user-ns2
+spec:
+  params:
+    - name: distro
+      value: autosd
+    - name: target
+      value: qemu
+    - name: arch
+      value: x86_64
+    - name: export-format
+      value: qcow2
+    - name: mode
+      value: package
+    - name: storage-class
+      value: crc-csi-hostpath-provisioner
+    - name: automotive-osbuild-image
+      value: 'quay.io/centos-sig-automotive/automotive-osbuild:latest'
+    - name: output-pvc-size
+      value: 20Gi
+  pipelineSpec:
+    params:
+    - default: cs9
+      description: Build for this distro specification
+      name: distro
+      type: string
+    - default: image
+      description: Build for this target
+      name: target
+      type: string
+    - default: amd64
+      description: Build for this architecture
+      name: arch
+      type: string
+    - default: image
+      description: 'Export format for the image (qcow2, image)'
+      name: export-format
+      type: string
+    - default: image
+      description: 'Build this image mode (package, image)'
+      name: mode
+      type: string
+    - description: Storage class for the PVC to build on
+      name: storage-class
+      type: string
+    - default: 'quay.io/centos-sig-automotive/automotive-osbuild:latest'
+      description: Automotive OSBuild image to use for building
+      name: automotive-osbuild-image
+      type: string
+    - default: 12Gi
+      description: Size of the PVC to create for the build
+      name: output-pvc-size
+      type: string
+    tasks:
+      - name: create-build-pvc
+        params:
+          - name: pvc-name
+            value: build-pvc-$(context.pipelineRun.uid)
+          - name: pvc-size
+            value: $(params.output-pvc-size)
+          - name: storage-class
+            value: $(params.storage-class)
+        taskRef:
+          kind: Task
+          name: create-pvc
+      - name: build-image-amd64
+        params:
+          - name: target-architecture
+            value: $(params.arch)
+          - name: distro
+            value: $(params.distro)
+          - name: target
+            value: $(params.target)
+          - name: mode
+            value: $(params.mode)
+          - name: export-format
+            value: $(params.export-format)
+          - name: build-pvc-name
+            value: $(tasks.create-build-pvc.results.pvc-name)
+          - name: automotive-osbuild-image
+            value: $(params.automotive-osbuild-image)
+          - name: secret-ref
+            value: regcred
+        runAfter:
+          - create-build-pvc
+        taskRef:
+          kind: Task
+          name: build-automotive-image-amd64
+        when:
+          - input: $(params.arch)
+            operator: in
+            values:
+              - x86_64
+              - amd64
+        workspaces:
+          - name: shared-workspace
+            workspace: shared-workspace
+          - name: mpp-config-workspace
+            workspace: mpp-config-workspace
+      - name: build-image-arm64
+        params:
+          - name: target-architecture
+            value: $(params.arch)
+          - name: distro
+            value: $(params.distro)
+          - name: target
+            value: $(params.target)
+          - name: mode
+            value: $(params.mode)
+          - name: export-format
+            value: $(params.export-format)
+          - name: build-pvc-name
+            value: $(tasks.create-build-pvc.results.pvc-name)
+          - name: automotive-osbuild-image
+            value: $(params.automotive-osbuild-image)
+          - name: secret-ref
+            value: regcred
+        runAfter:
+          - create-build-pvc
+        taskRef:
+          kind: Task
+          name: build-automotive-image-arm64
+        when:
+          - input: $(params.arch)
+            operator: in
+            values:
+              - aarch64
+              - arm64
+        workspaces:
+          - name: shared-workspace
+            workspace: shared-workspace
+          - name: mpp-config-workspace
+            workspace: mpp-config-workspace
+      - name: push-artifact-registry
+        params:
+          - name: build-pvc-name
+            value: $(tasks.create-build-pvc.results.pvc-name)
+          - name: distro
+            value: $(params.distro)
+          - name: target
+            value: $(params.target)
+          - name: export-format
+            value: $(params.export-format)
+          - name: repository-url
+            value: 'quay.io/lrotenbe/cb:on-pr-{{revision}}'
+          - name: secret-ref
+            value: regcred
+        runAfter:
+          - build-image-amd64
+          - build-image-arm64
+        taskRef:
+          kind: Task
+          name: push-artifact-registry
+    workspaces:
+    - name: shared-workspace
+    - name: mpp-config-workspace
+  taskRunTemplate:
+    podTemplate:
+      nodeSelector:
+        kubernetes.io/arch: amd64
+  timeouts:
+    pipeline: 1h0m0s
+  workspaces:
+    - name: shared-workspace
+      volumeClaimTemplate:
+        metadata:
+          creationTimestamp: null
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 5Gi
+          storageClassName: crc-csi-hostpath-provisioner
+        status: {}
+    - configMap:
+        name: mpp-config
+      name: mpp-config-workspace

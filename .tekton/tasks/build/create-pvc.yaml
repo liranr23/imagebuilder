@@ -1,0 +1,37 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: create-pvc
+spec:
+  params:
+    - name: pvc-name
+      type: string
+    - name: pvc-size
+      type: string
+    - name: storage-class
+      type: string
+      default: ""
+  results:
+    - name: pvc-name
+      description: The name of the created pvc
+  steps:
+    - name: create-pvc
+      image: bitnami/kubectl:latest
+      script: |
+        #!/usr/bin/env bash
+        set -e
+        cat <<EOF | kubectl create -f -
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: $(params.pvc-name)
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          storageClassName: $(params.storage-class)
+          resources:
+            requests:
+              storage: $(params.pvc-size)
+        EOF
+        echo -n "$(params.pvc-name)" > $(results.pvc-name.path)
