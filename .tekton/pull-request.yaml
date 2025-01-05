@@ -10,7 +10,7 @@ metadata:
     pipelinesascode.tekton.dev/on-cel-expression: event == "pull_request" && target_branch
       == "main"
     pipelinesascode.tekton.dev/task: "[.tekton/tasks/build/create-pvc.yaml, .tekton/tasks/build/build-amd64.yaml, .tekton/tasks/build/build-arm64.yaml, .tekton/tasks/build/process-command.yaml,
-      .tekton/tasks/push/push-reg.yaml, .tekton/tasks/push/push-s3.yaml, .tekton/tasks/push/push-azure.yaml]"
+      .tekton/tasks/push/push-reg.yaml, .tekton/tasks/push/push-s3.yaml, .tekton/tasks/push/push-azure.yaml, .tekton/tasks/build/create-cm.yaml]"
   creationTimestamp: null
   labels:
     appstudio.openshift.io/application: imagebuilder
@@ -36,8 +36,22 @@ spec:
       value: 'quay.io/centos-sig-automotive/automotive-osbuild:latest'
     - name: output-pvc-size
       value: 20Gi
+    - name: git-url
+      value: '{{source_url}}'
+    - name: revision
+      value: '{{revision}}'
+    - name: cm-name
+      value: cm.yaml
   pipelineSpec:
     params:
+    - default: ""
+      description: Source Repository URL
+      name: git-url
+      type: string
+    - default: ""
+      description: Revision of the Source Repository
+      name: revision
+      type: string
     - default: cs9
       description: Build for this distro specification
       name: distro
@@ -69,6 +83,9 @@ spec:
       description: Size of the PVC to create for the build
       name: output-pvc-size
       type: string
+    - default: ""
+      name: cm-name
+      type: string
     tasks:
       - name: create-build-pvc
         params:
@@ -78,9 +95,37 @@ spec:
             value: $(params.output-pvc-size)
           - name: storage-class
             value: $(params.storage-class)
+        runAfter:
+          - create-cm
         taskRef:
           kind: Task
           name: create-pvc
+      - name: create-cm
+        params:
+          - name: cm-name
+            value: $(params.cm-name)
+        runAfter:
+          - clone-repository
+        workspaces:
+        - name: workspace
+          workspace: source-workspace
+        taskRef:
+          kind: Task
+          name: create-cm
+      - name: clone-repository
+        params:
+          - name: url
+            value: $(params.git-url)
+          - name: revision
+            value: $(params.revision)
+        taskRef:
+          name: git-clone
+          kind: ClusterTask
+        workspaces:
+        - name: output
+          workspace: source-workspace
+        - name: basic-auth
+          workspace: git-auth
       - name: build-image-amd64
         params:
           - name: target-architecture
@@ -178,6 +223,9 @@ spec:
         kubernetes.io/arch: amd64
   timeouts:
     pipeline: 1h0m0s
+  podTemplate:
+    securityContext:
+      fsGroup: 65532
   workspaces:
     - name: shared-workspace
       volumeClaimTemplate:
@@ -189,6 +237,19 @@ spec:
           resources:
             requests:
               storage: 5Gi
+          storageClassName: crc-csi-hostpath-provisioner
+        status: {}
+    - name: source-workspace
+      volumeClaimTemplate:
+        metadata:
+          creationTimestamp: null
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 1Gi
+          volumeMode: Filesystem
           storageClassName: crc-csi-hostpath-provisioner
         status: {}
     - configMap:
