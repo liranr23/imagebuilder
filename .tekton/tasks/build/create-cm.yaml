@@ -1,0 +1,26 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: create-cm
+spec:
+  params:
+    - name: cm-name
+      type: string
+  workspaces:
+    - name: workspace
+      mountPath: /workspace/shared
+  steps:
+    - name: create-cm
+      image: bitnami/kubectl:latest
+      script: |
+        #!/usr/bin/env bash
+        set -e
+        CM_FILE=$(find $(workspaces.workspace.path) -name $(params.cm-name) -type f)
+        if [ -z "$CM_FILE" ]; then
+          echo "No cm.yaml file found in the ConfigMap"
+          exit 0
+        fi
+
+        echo "Create ConfigMap with the manifest..."
+        kubectl apply -f $CM_FILE
